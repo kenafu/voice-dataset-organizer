@@ -2,7 +2,7 @@ import os
 import csv
 import shutil
 import tkinter as tk
-from tkinter import filedialog, messagebox, scrolledtext
+from tkinter import filedialog, messagebox, scrolledtext, simpledialog
 from tkinter import ttk
 from datetime import datetime
 import threading
@@ -149,6 +149,15 @@ class DatasetOrganizerApp:
         )
         btn_dedup.pack(side="top", pady=5)
         
+        btn_reset = tk.Button(
+            frame_tools_left,
+            text="感情分けリセット\n(全て1つのフォルダに集約)",
+            command=self.reset_emotion_sorting,
+            bg="#e1bee7",
+            height=2
+        )
+        btn_reset.pack(side="top", pady=5)
+
         if not HAS_LIBROSA:
             btn_dedup.config(state="disabled", text="重複チェック不可 (librosa不足)")
 
@@ -601,6 +610,286 @@ class DatasetOrganizerApp:
         except Exception as e:
             messagebox.showerror("エラー", f"処理中にエラーが発生しました: {e}")
             self.log(f"エラー: {e}")
+
+    def reset_emotion_sorting(self):
+        """感情分けリセット機能: ファイルを集約しesd.listを更新"""
+        dataset_root = self.dataset_dir.get()
+        if not dataset_root or not os.path.exists(dataset_root):
+            messagebox.showerror("エラー", "有効なデータセットフォルダを指定してください。")
+            return
+
+        esd_path = os.path.join(dataset_root, "esd.list")
+        raw_dir = os.path.join(dataset_root, "raw")
+
+        if not os.path.exists(esd_path) or not os.path.exists(raw_dir):
+            messagebox.showerror("エラー", "esd.list または rawフォルダが見つかりません。")
+            return
+
+        # --- 設定ダイアログ ---
+        dialog = tk.Toplevel(self.root)
+        dialog.title("感情分けリセット設定")
+        dialog.geometry("450x350")
+        dialog.grab_set() # モーダル化
+
+        # 結果格納用
+        result = {"ok": False, "mode": "all", "source": "", "target": "Neutral"}
+
+        # モード選択
+        lbl_mode = tk.Label(dialog, text="対象範囲を選択:", font=("bold"))
+        lbl_mode.pack(anchor="w", padx=20, pady=(20, 5))
+        
+        var_mode = tk.StringVar(value="all")
+        
+        rb_all = tk.Radiobutton(dialog, text="全てのファイルを対象 (全感情を一括リセット)", variable=var_mode, value="all")
+        rb_all.pack(anchor="w", padx=40)
+        
+        rb_specific = tk.Radiobutton(dialog, text="特定の感情フォルダのみ対象", variable=var_mode, value="specific")
+        rb_specific.pack(anchor="w", padx=40)
+
+        # 特定フォルダ選択用コンボ
+        frame_specific = tk.Frame(dialog)
+        frame_specific.pack(fill="x", padx=60, pady=5)
+        
+        # 現在のディレクトリ一覧取得
+        current_dirs = [d for d in os.listdir(raw_dir) if os.path.isdir(os.path.join(raw_dir, d))]
+        current_dirs.sort()
+        
+        lbl_src = tk.Label(frame_specific, text="対象フォルダ:")
+        lbl_src.pack(side="left")
+        combo_src = ttk.Combobox(frame_specific, values=current_dirs, state="readonly", width=20)
+        combo_src.pack(side="left", padx=5)
+        if current_dirs: combo_src.current(0)
+
+        # ターゲット入力
+        lbl_target = tk.Label(dialog, text="移動先の感情名 (フォルダ名):", font=("bold"))
+        lbl_target.pack(anchor="w", padx=20, pady=(20, 5))
+        
+        lbl_target_desc = tk.Label(dialog, text="※「Neutral」などが一般的。空欄にするとraw直下に移動します。")
+        lbl_target_desc.pack(anchor="w", padx=20)
+        
+        entry_target = tk.Entry(dialog, width=30)
+        entry_target.pack(anchor="w", padx=40, pady=5)
+        entry_target.insert(0, "Neutral")
+
+        # 上書き許可
+        var_overwrite = tk.BooleanVar(value=False)
+        chk_overwrite = tk.Checkbutton(dialog, text="同名ファイルがある場合は上書きする (危険)", variable=var_overwrite, fg="red")
+        chk_overwrite.pack(anchor="w", padx=40, pady=10)
+
+        # ボタン
+        frame_btn = tk.Frame(dialog, pady=20)
+        frame_btn.pack(fill="x")
+        
+        def on_ok():
+            mode = var_mode.get()
+            src = combo_src.get()
+            tgt = entry_target.get().strip()
+            overwrite = var_overwrite.get()
+            
+            # バリデーション
+            if mode == "specific":
+                if not src:
+                    messagebox.showerror("エラー", "対象フォルダを選択してください。", parent=dialog)
+                    return
+                if src not in current_dirs: # 念のため
+                     messagebox.showerror("エラー", "存在しないフォルダです。", parent=dialog)
+                     return
+
+            tgt_safe = "".join(c for c in tgt if c.isalnum() or c in (' ', '_', '-')).strip()
+            if tgt and tgt != tgt_safe:
+                 messagebox.showwarning("注意", "フォルダ名に使えない文字が含まれています。修正して続行します。", parent=dialog)
+            
+            result["ok"] = True
+            result["mode"] = mode
+            result["source"] = src
+            result["target"] = tgt_safe
+            result["overwrite"] = overwrite
+            dialog.destroy()
+
+        def on_cancel():
+            dialog.destroy()
+
+        btn_cancel = tk.Button(frame_btn, text="キャンセル", command=on_cancel)
+        btn_cancel.pack(side="right", padx=20)
+        btn_ok = tk.Button(frame_btn, text="実行", command=on_ok, bg="#e1bee7", width=10)
+        btn_ok.pack(side="right", padx=10)
+        
+        # UI連動
+        def update_state(*args):
+            if var_mode.get() == "specific":
+                combo_src.config(state="readonly")
+            else:
+                combo_src.config(state="disabled")
+        var_mode.trace_add("write", update_state)
+        update_state() # 初期化
+
+        self.root.wait_window(dialog)
+        
+        if not result["ok"]: return
+
+        # パラメータ取り出し
+        mode = result["mode"]
+        source_dir_name = result["source"]
+        target_emotion = result["target"]
+        allow_overwrite = result["overwrite"]
+        
+        # 処理対象の説明文
+        if mode == "all":
+            target_desc = "全ての音声ファイル"
+        else:
+            target_desc = f"フォルダ '{source_dir_name}' 内のファイル"
+            
+        dest_desc = f"'raw/{target_emotion}'" if target_emotion else "'raw' 直下"
+        
+        msg = f"{target_desc} を {dest_desc} に移動し、esd.listを更新しますか？\n\n・バックアップは作成されます\n・元の構造は変更されます"
+        if allow_overwrite:
+            msg += "\n・【注意】同名ファイルは上書きされます"
+
+        if not messagebox.askyesno("確認", msg):
+            return
+
+        try:
+            self.log(f"=== 感情分けリセット開始 ({mode}) -> {dest_desc} (上書き:{allow_overwrite}) ===")
+            
+            # バックアップ
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_root = os.path.join(dataset_root, f"backup_reset_{timestamp}")
+            self.log(f"バックアップを作成中...: {backup_root}")
+            os.makedirs(backup_root, exist_ok=True)
+            if os.path.exists(esd_path):
+                shutil.copy2(esd_path, os.path.join(backup_root, "esd.list"))
+            if os.path.exists(raw_dir):
+                shutil.copytree(raw_dir, os.path.join(backup_root, "raw"))
+
+            # ファイル移動計画
+            files_to_move = [] # (src_path, dest_path)
+            
+            if target_emotion:
+                dest_dir = os.path.join(raw_dir, target_emotion)
+            else:
+                dest_dir = raw_dir
+
+            # ファイル収集
+            all_files_to_process = [] # (filename, src_path)
+
+            if mode == "all":
+                for root, dirs, files in os.walk(raw_dir):
+                    for file in files:
+                        if file.endswith(('.wav', '.ogg', '.mp3')):
+                            src_path = os.path.join(root, file)
+                            all_files_to_process.append((file, src_path))
+            else:
+                # specific
+                source_full_path = os.path.join(raw_dir, source_dir_name)
+                if os.path.exists(source_full_path):
+                    for root, dirs, files in os.walk(source_full_path):
+                         for file in files:
+                            if file.endswith(('.wav', '.ogg', '.mp3')):
+                                src_path = os.path.join(root, file)
+                                all_files_to_process.append((file, src_path))
+
+            # 衝突チェック
+            if not allow_overwrite:
+                seen = set()
+                dupes = []
+                for f, s in all_files_to_process:
+                    if f in seen: dupes.append(f)
+                    seen.add(f)
+                
+                if dupes:
+                    messagebox.showerror("エラー", f"対象ファイル内で名前が重複しています。\n上書きを許可するか、ファイルを整理してください。\n{dupes[:5]}...")
+                    return
+
+            # 移動計画作成
+            for fname, src in all_files_to_process:
+                dest_path = os.path.join(dest_dir, fname)
+                
+                # 移動先チェック
+                if os.path.normpath(src) == os.path.normpath(dest_path):
+                    continue
+                
+                if os.path.exists(dest_path) and not allow_overwrite:
+                    messagebox.showerror("エラー", f"移動先に同名ファイルが存在します: {fname}\n処理を中止します。")
+                    return
+                
+                files_to_move.append((src, dest_path))
+
+            # esd.list更新用マッピング
+            path_map_all = {}
+            for fname, src in all_files_to_process:
+                src_norm = os.path.normpath(src)
+                if target_emotion:
+                     rel = f"{target_emotion}/{fname}"
+                else:
+                     rel = fname
+                path_map_all[src_norm] = rel
+
+            new_lines = []
+            updated_count = 0
+            
+            with open(esd_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line: continue
+                    parts = line.split('|')
+                    if len(parts) < 2: 
+                        new_lines.append(line + "\n")
+                        continue
+                    
+                    filename = os.path.basename(parts[0])
+                    
+                    # 対象ファイルリストから検索
+                    target_src_path = None
+                    for fn, ap in all_files_to_process:
+                        if fn == filename:
+                            target_src_path = ap
+                            break
+                    
+                    if target_src_path:
+                        # 更新対象
+                        new_rel = path_map_all[os.path.normpath(target_src_path)]
+                        parts[0] = new_rel
+                        updated_count += 1
+                        new_lines.append("|".join(parts) + "\n")
+                    else:
+                        new_lines.append(line + "\n")
+
+            # 実行：ファイル移動
+            if target_emotion:
+                os.makedirs(dest_dir, exist_ok=True)
+                
+            for src, dest in files_to_move:
+                shutil.move(src, dest)
+            
+            # 実行：esd書き込み
+            with open(esd_path, 'w', encoding='utf-8') as f:
+                f.writelines(new_lines)
+
+            # 空フォルダ掃除
+            if mode == "all":
+                for root, dirs, files in os.walk(raw_dir, topdown=False):
+                    for name in dirs:
+                        try:
+                            d_path = os.path.join(root, name)
+                            if os.path.normpath(d_path) == os.path.normpath(dest_dir): continue
+                            if not os.listdir(d_path): os.rmdir(d_path)
+                        except: pass
+            elif mode == "specific":
+                s_path = os.path.join(raw_dir, source_dir_name)
+                try:
+                    if os.path.exists(s_path) and not os.listdir(s_path) and os.path.normpath(s_path) != os.path.normpath(dest_dir):
+                        os.rmdir(s_path)
+                except: pass
+            
+            self.log(f"リセット完了。移動: {len(files_to_move)}件, ESD更新: {updated_count}行")
+            messagebox.showinfo("完了", "処理が完了しました。")
+            self.load_preview()
+
+        except Exception as e:
+            messagebox.showerror("エラー", f"処理中にエラーが発生しました: {e}")
+            self.log(f"エラー: {e}")
+            import traceback
+            traceback.print_exc()
 
     # ---------------------------------------------------------
     # 重複音声検出機能 (Deduplication Tool)
